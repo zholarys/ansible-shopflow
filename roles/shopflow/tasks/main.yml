@@ -1,0 +1,66 @@
+---
+- name: Clone ShopFlow repository
+  git:
+    repo: https://github.com/zholarys/shopflow.git
+    dest: /home/ubuntu/shopflow
+    force: yes
+  become: yes
+
+- name: Create .env file
+  copy:
+    dest: /home/ubuntu/shopflow/.env
+    content: |
+      POSTGRES_DB=shopflow
+      POSTGRES_USER=shopflow
+      POSTGRES_PASSWORD=shopflow_secret
+      REDIS_PASSWORD=redis_secret
+      SECRET_KEY=production_secret_key
+      DEBUG=false
+      GRAFANA_PASSWORD=admin
+  become: yes
+
+- name: Fix docker-compose ports
+  replace:
+    path: /home/ubuntu/shopflow/docker-compose.yml
+    regexp: '127\.0\.0\.1:80:80'
+    replace: '0.0.0.0:80:80'
+  become: yes
+
+- name: Start containers
+  shell: docker compose up -d postgres redis backend
+  args:
+    chdir: /home/ubuntu/shopflow
+  become: yes
+
+- name: Wait for backend to be ready
+  pause:
+    seconds: 15
+
+- name: Init database
+  shell: docker exec -w /app shopflow-backend python -m app.init_db
+  become: yes
+  ignore_errors: yes
+
+- name: Seed products
+  shell: docker exec -w /app shopflow-backend python -m app.seed
+  become: yes
+  ignore_errors: yes
+
+- name: Start frontend and nginx
+  shell: docker compose up -d frontend nginx
+  args:
+    chdir: /home/ubuntu/shopflow
+  become: yes
+
+- name: Fix frontend API URL
+  replace:
+    path: /home/ubuntu/shopflow/frontend/src/App.jsx
+    regexp: 'http://localhost/api'
+    replace: 'http://56.228.29.223/api'
+  become: yes
+
+- name: Rebuild frontend
+  shell: docker compose up --build -d frontend
+  args:
+    chdir: /home/ubuntu/shopflow
+  become: yes
