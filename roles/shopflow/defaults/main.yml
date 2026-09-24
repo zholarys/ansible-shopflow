@@ -1,0 +1,7 @@
+---
+shopflow_user: "{{ ansible_user | default('ubuntu') }}"
+shopflow_dir: "/home/{{ shopflow_user }}/shopflow"
+shopflow_repo: https://github.com/zholarys/shopflow.git
+shopflow_version: main
+shopflow_http_bind: 127.0.0.1
+shopflow_services: [postgres, redis, backend, frontend, nginx]

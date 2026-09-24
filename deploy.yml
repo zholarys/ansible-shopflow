@@ -1,8 +1,9 @@
 ---
-- name: Deploy ShopFlow
+- name: Deploy ShopFlow lab
   hosts: shopflow_servers
-  become: no
-
+  become: true
+  vars_files:
+    - secrets.yml
   roles:
     - docker
     - shopflow

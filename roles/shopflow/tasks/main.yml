@@ -1,66 +1,76 @@
 ---
-- name: Clone ShopFlow repository
-  git:
-    repo: https://github.com/zholarys/shopflow.git
-    dest: /home/ubuntu/shopflow
-    force: yes
-  become: yes
+- name: Require explicit strong environment values
+  ansible.builtin.assert:
+    that:
+      - shopflow_postgres_password is match('^[A-Za-z0-9]{24,}$')
+      - shopflow_redis_password is match('^[A-Za-z0-9]{24,}$')
+      - shopflow_jwt_secret is match('^[A-Za-z0-9]{32,}$')
+      - shopflow_grafana_password is match('^[A-Za-z0-9]{24,}$')
+    fail_msg: Generate random alphanumeric secrets before deploying.
+  no_log: true
 
-- name: Create .env file
-  copy:
-    dest: /home/ubuntu/shopflow/.env
-    content: |
-      POSTGRES_DB=shopflow
-      POSTGRES_USER=shopflow
-      POSTGRES_PASSWORD=shopflow_secret
-      REDIS_PASSWORD=redis_secret
-      SECRET_KEY=production_secret_key
-      DEBUG=false
-      GRAFANA_PASSWORD=admin
-  become: yes
+- name: Clone the selected ShopFlow revision as deployment user
+  ansible.builtin.git:
+    repo: "{{ shopflow_repo }}"
+    dest: "{{ shopflow_dir }}"
+    version: "{{ shopflow_version }}"
+    force: false
+  become_user: "{{ shopflow_user }}"
+  register: shopflow_checkout
 
-- name: Fix docker-compose ports
-  replace:
-    path: /home/ubuntu/shopflow/docker-compose.yml
-    regexp: '127\.0\.0\.1:80:80'
-    replace: '0.0.0.0:80:80'
-  become: yes
+- name: Configure private environment file
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ shopflow_dir }}/.env"
+    owner: "{{ shopflow_user }}"
+    mode: '0600'
+  no_log: true
 
-- name: Start containers
-  shell: docker compose up -d postgres redis backend
-  args:
-    chdir: /home/ubuntu/shopflow
-  become: yes
+- name: Start database, cache and backend
+  community.docker.docker_compose_v2:
+    project_src: "{{ shopflow_dir }}"
+    services: [postgres, redis, backend]
+    build: "{{ 'always' if shopflow_checkout.changed else 'policy' }}"
+    state: present
+    wait: true
+    wait_timeout: 180
 
-- name: Wait for backend to be ready
-  pause:
-    seconds: 15
+- name: Verify backend HTTP readiness
+  ansible.builtin.uri:
+    url: http://127.0.0.1:8000/api/health
+    status_code: 200
+  register: shopflow_ready
+  until: shopflow_ready.status | default(0) == 200
+  retries: 30
+  delay: 2
 
-- name: Init database
-  shell: docker exec -w /app shopflow-backend python -m app.init_db
-  become: yes
-  ignore_errors: yes
+- name: Initialize missing database tables
+  ansible.builtin.command:
+    argv: [docker, compose, exec, -T, backend, python, -m, app.init_db]
+    chdir: "{{ shopflow_dir }}"
+  changed_when: false
 
-- name: Seed products
-  shell: docker exec -w /app shopflow-backend python -m app.seed
-  become: yes
-  ignore_errors: yes
+- name: Seed missing demo products
+  ansible.builtin.command:
+    argv: [docker, compose, exec, -T, backend, python, -m, app.seed]
+    chdir: "{{ shopflow_dir }}"
+  register: shopflow_seed
+  changed_when: "'Added 0 missing demo products' not in shopflow_seed.stdout"
 
-- name: Start frontend and nginx
-  shell: docker compose up -d frontend nginx
-  args:
-    chdir: /home/ubuntu/shopflow
-  become: yes
+- name: Start selected application services
+  community.docker.docker_compose_v2:
+    project_src: "{{ shopflow_dir }}"
+    services: "{{ shopflow_services }}"
+    build: "{{ 'always' if shopflow_checkout.changed else 'policy' }}"
+    state: present
+    wait: true
+    wait_timeout: 180
 
-- name: Fix frontend API URL
-  replace:
-    path: /home/ubuntu/shopflow/frontend/src/App.jsx
-    regexp: 'http://localhost/api'
-    replace: 'http://56.228.29.223/api'
-  become: yes
-
-- name: Rebuild frontend
-  shell: docker compose up --build -d frontend
-  args:
-    chdir: /home/ubuntu/shopflow
-  become: yes
+- name: Verify the reverse proxy
+  ansible.builtin.uri:
+    url: http://127.0.0.1/api/health
+    status_code: 200
+  register: shopflow_proxy
+  until: shopflow_proxy.status | default(0) == 200
+  retries: 15
+  delay: 2
